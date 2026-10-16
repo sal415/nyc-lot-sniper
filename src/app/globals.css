@@ -1,0 +1,45 @@
+@import "tailwindcss";
+
+:root {
+  --background: #030712;
+  --foreground: #f1f5f9;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/* Thin scrollbar for dark panels */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+
+/* Detail panel slide-in animation */
+@keyframes slideInFromRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+@keyframes fadeInBackdrop {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.panel-slide-in  { animation: slideInFromRight 220ms cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+.panel-backdrop  { animation: fadeInBackdrop 150ms ease forwards; }
+
+/* Score bar grow animation */
+@keyframes barGrow {
+  from { width: 0%; }
+}
+.score-bar-grow { animation: barGrow 400ms ease-out forwards; }
+
+/* Respect reduced-motion */
+@media (prefers-reduced-motion: reduce) {
+  .panel-slide-in, .panel-backdrop, .score-bar-grow { animation: none; }
+}
+
+/* Hide scrollbar for horizontal tab nav on mobile */
+.scrollbar-none { scrollbar-width: none; }
+.scrollbar-none::-webkit-scrollbar { display: none; }
