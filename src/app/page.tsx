@@ -22,7 +22,6 @@ export default function Dashboard() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Restore the last active dataset after mount (localStorage is client-only).
   useEffect(() => {
     try {
       const saved = localStorage.getItem(ACTIVE_DATASET_KEY);
@@ -75,6 +74,15 @@ export default function Dashboard() {
     };
   }, [activeDatasetId, params]);
 
+  function handleSort(sortBy: string) {
+    setParams((prev) => ({
+      ...prev,
+      sortBy,
+      sortDir: prev.sortBy === sortBy && prev.sortDir === "desc" ? "asc" : "desc",
+      page: 1,
+    }));
+  }
+
   return (
     <main className="mx-auto w-full max-w-7xl flex-1 space-y-6 px-4 py-8">
       <header>
@@ -111,7 +119,7 @@ export default function Dashboard() {
           </span>
         </div>
         {activeDatasetId ? (
-          <ParcelTable rows={rows} loading={loading} />
+          <ParcelTable rows={rows} loading={loading} params={params} onSort={handleSort} />
         ) : (
           <p className="px-4 py-10 text-center text-sm text-gray-500">
             Upload a PLUTO CSV to get started.

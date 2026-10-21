@@ -1,11 +1,15 @@
-// NYC Open Data (Socrata) enrichment for parcels.
+// NYC Open Data (Socrata) bulk enrichment for parcels.
 // All endpoints are free. App token is optional — without it we hit a lower
 // rate limit. Set SOCRATA_APP_TOKEN env var to raise limits.
 //
 // Sources:
-//   ACRIS Real Property Master   bnx9-e6tj   (sales / mortgages / liens)
+//   ACRIS Real Property Master   bnx9-e6tj   (sales / mortgages)
 //   ACRIS Real Property Legals   8h5j-fqxa   (BBL ↔ document_id)
-//   ACRIS Real Property Parties  636b-3b5g   (grantee names)
+//   DOB NOW Job Filings          w9ak-ipjd   (active jobs)
+//   DOB Permit Issuance (legacy) ipu4-2q9a   (recent permits)
+//   DOB Violations               3h2n-5cm9   (open violations)
+//   HPD Housing Maintenance      wvxf-dwi5   (open HPD violations)
+//   Tax Lien Sale List           9rz4-mjek   (distress flag)
 
 import { EnrichmentBlob } from "./scoring";
 import { classifyAcrisDistress } from "./acrisDistress";
@@ -17,10 +21,17 @@ const ENDPOINTS = {
   ACRIS_LEGALS:  "https://data.cityofnewyork.us/resource/8h5j-fqxa.json",
   ACRIS_MASTER:  "https://data.cityofnewyork.us/resource/bnx9-e6tj.json",
   ACRIS_PARTIES: "https://data.cityofnewyork.us/resource/636b-3b5g.json",
+  DOB_JOBS:      "https://data.cityofnewyork.us/resource/ic3t-wcy2.json",
+  DOB_PERMITS:   "https://data.cityofnewyork.us/resource/ipu4-2q9a.json",
+  DOB_VIOLS:     "https://data.cityofnewyork.us/resource/3h2n-5cm9.json",
+  HPD_VIOLS:     "https://data.cityofnewyork.us/resource/wvxf-dwi5.json",
+  TAX_LIEN:      "https://data.cityofnewyork.us/resource/9rz4-mjek.json",
 };
 
+export type EnrichmentSource = "acris" | "permits" | "dobViolations" | "hpdViolations";
+
 export interface EnrichmentProgressEvent {
-  source: "acris";
+  source: EnrichmentSource;
   status: "started" | "done" | "failed";
   message: string;
   parcelsWithData?: number;
@@ -32,6 +43,11 @@ function parseBbl(bbl: string): BblParts | null {
   if (!bbl || bbl.length < 10) return null;
   return { borough: bbl[0], block: bbl.slice(1, 6), lot: bbl.slice(6, 10) };
 }
+
+/** DOB datasets store block/lot as 5-digit zero-padded text. BBL has block
+ *  5-padded already and lot 4-padded; pad lot up to 5. */
+function dobBlock(p: BblParts): string { return p.block; }                // already 5
+function dobLot(p: BblParts):   string { return "0" + p.lot; }            // 4 -> 5
 
 async function socrata(url: string, query: Record<string, string>): Promise<unknown[]> {
   const params = new URLSearchParams(query);
@@ -66,7 +82,7 @@ function chunk<T>(arr: T[], n: number): T[][] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ACRIS — sales, mortgages and distress filings per BBL
+// Source-specific fetchers — each returns Map<bbl, partial enrichment>
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function fetchAcris(bbls: string[]): Promise<Map<string, Partial<EnrichmentBlob>>> {
@@ -186,9 +202,143 @@ async function fetchAcris(bbls: string[]): Promise<Map<string, Partial<Enrichmen
   return out;
 }
 
+/** PLUTO borough digit → DOB Permits uppercase borough name. */
+const BORO_NAME: Record<string, string> = {
+  "1": "MANHATTAN", "2": "BRONX", "3": "BROOKLYN", "4": "QUEENS", "5": "STATEN ISLAND",
+};
+
+async function fetchDobJobs(bbls: string[]): Promise<Map<string, Partial<EnrichmentBlob>>> {
+  // DOB Permit Issuance (ipu4-2q9a) has no `bbl` column — uses borough (full
+  // uppercase name), block (text), lot (text). Filter by tuples.
+  const out = new Map<string, Partial<EnrichmentBlob>>();
+  const cutoff = new Date(); cutoff.setFullYear(cutoff.getFullYear() - 2);
+  const cutoffISO = cutoff.toISOString().slice(0, 10);
+
+  let totalRows = 0;
+  let totalRecent = 0;
+  for (const batch of chunk(bbls, 25)) {
+    const parts = batch.map(parseBbl).filter((b): b is BblParts => b !== null);
+    if (!parts.length) continue;
+    const predicates = parts.map((p) => {
+      const boro = BORO_NAME[p.borough];
+      if (!boro) return null;
+      // DOB Permits mostly stores lot as 5-digit zero-padded text, but a
+      // small tail appears as 4-digit. Accept both, matching other DOB feeds.
+      return `(borough='${boro}' AND block='${dobBlock(p)}' AND (lot='${dobLot(p)}' OR lot='${p.lot}'))`;
+    }).filter(Boolean).join(" OR ");
+    if (!predicates) continue;
+
+    const rows = await socrata(ENDPOINTS.DOB_PERMITS, {
+      $where: predicates,
+      $select: "borough,block,lot,filing_date,issuance_date,permit_status",
+      $limit: "20000",
+    }) as Array<{ borough: string; block: string; lot: string; filing_date?: string; issuance_date?: string; permit_status?: string }>;
+    totalRows += rows.length;
+
+    for (const r of rows) {
+      const permitDate = parsePermitDate(r.issuance_date ?? r.filing_date);
+      if (!permitDate || permitDate < cutoffISO) continue;
+      totalRecent += 1;
+
+      const boroDigit = Object.entries(BORO_NAME).find(([, n]) => n === r.borough)?.[0];
+      if (!boroDigit) continue;
+      // r.lot comes back as "00001" (5-pad) — need to convert to 4-pad for BBL.
+      const lot4 = String(r.lot).replace(/^0+/, "").padStart(4, "0") || "0000";
+      const bbl =
+        boroDigit +
+        String(r.block).padStart(5, "0") +
+        lot4;
+      const cur = out.get(bbl) ?? {};
+      cur.recent_permits_2y = (cur.recent_permits_2y ?? 0) + 1;
+      const status = r.permit_status ?? "";
+      if (/ACTIVE|IN PROCESS|FILED|ISSUED/i.test(status)) {
+        cur.active_dob_jobs = (cur.active_dob_jobs ?? 0) + 1;
+      }
+      out.set(bbl, cur);
+    }
+  }
+  console.log(`[enrich] DOB Permits rows=${totalRows} recent=${totalRecent} parcelsWithData=${out.size}/${bbls.length}`);
+  return out;
+}
+
+function parsePermitDate(value: string | undefined): string | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  const iso = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+
+  const us = trimmed.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  if (!us) return null;
+  const [, mm, dd, yyyy] = us;
+  return `${yyyy}-${mm.padStart(2, "0")}-${dd.padStart(2, "0")}`;
+}
+
+async function fetchDobViolations(bbls: string[]): Promise<Map<string, Partial<EnrichmentBlob>>> {
+  // DOB Violations (3h2n-5cm9) uses `boro` (1-digit), `block`, `lot`.
+  const out = new Map<string, Partial<EnrichmentBlob>>();
+  let totalRows = 0;
+  for (const batch of chunk(bbls, 25)) {
+    const parts = batch.map(parseBbl).filter((b): b is BblParts => b !== null);
+    if (!parts.length) continue;
+    // DOB Violations: block/lot are 5-digit zero-padded (mostly). A small
+    // tail uses 4-digit lot — accept both via OR.
+    const predicates = parts.map(
+      (p) => `(boro='${p.borough}' AND block='${dobBlock(p)}' AND (lot='${dobLot(p)}' OR lot='${p.lot}'))`
+    ).join(" OR ");
+
+    const rows = await socrata(ENDPOINTS.DOB_VIOLS, {
+      $where: `(${predicates}) AND violation_category NOT LIKE '%RESOLVED%' AND violation_category NOT LIKE '%DISMISSED%'`,
+      $select: "boro,block,lot",
+      $limit: "20000",
+    }) as Array<{ boro: string; block: string; lot: string }>;
+    totalRows += rows.length;
+    for (const r of rows) {
+      const lot4 = String(r.lot).replace(/^0+/, "").padStart(4, "0") || "0000";
+      const bbl =
+        String(r.boro).padStart(1, "0") +
+        String(r.block).padStart(5, "0") +
+        lot4;
+      const cur = out.get(bbl) ?? {};
+      cur.open_dob_violations = (cur.open_dob_violations ?? 0) + 1;
+      out.set(bbl, cur);
+    }
+  }
+  console.log(`[enrich] DOB Violations rows=${totalRows} parcelsWithData=${out.size}/${bbls.length}`);
+  return out;
+}
+
+async function fetchHpdViolations(bbls: string[]): Promise<Map<string, Partial<EnrichmentBlob>>> {
+  const out = new Map<string, Partial<EnrichmentBlob>>();
+  let totalRows = 0;
+  for (const batch of chunk(bbls, 25)) {
+    // HPD uses borough/block/lot columns separately, not bbl
+    const parts = batch.map(parseBbl).filter((b): b is BblParts => b !== null);
+    if (!parts.length) continue;
+    const predicates = parts.map(
+      (p) => `(boroid='${p.borough}' AND block='${parseInt(p.block)}' AND lot='${parseInt(p.lot)}')`
+    ).join(" OR ");
+    const rows = await socrata(ENDPOINTS.HPD_VIOLS, {
+      $where: `(${predicates}) AND currentstatus NOT IN('VIOLATION CLOSED','VIOLATION DISMISSED')`,
+      $select: "boroid,block,lot",
+      $limit: "10000",
+    }) as Array<{ boroid: string; block: string; lot: string }>;
+    totalRows += rows.length;
+    for (const r of rows) {
+      const bbl =
+        String(r.boroid).padStart(1, "0") +
+        String(r.block).padStart(5, "0") +
+        String(r.lot).padStart(4, "0");
+      const cur = out.get(bbl) ?? {};
+      cur.open_hpd_violations = (cur.open_hpd_violations ?? 0) + 1;
+      out.set(bbl, cur);
+    }
+  }
+  console.log(`[enrich] HPD Violations rows=${totalRows} parcelsWithData=${out.size}/${bbls.length}`);
+  return out;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Public entry
+// Public entry — fetch all sources for a BBL list, return merged enrichments.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export async function bulkEnrich(
@@ -197,25 +347,66 @@ export async function bulkEnrich(
 ): Promise<Map<string, EnrichmentBlob>> {
   const unique = Array.from(new Set(bbls)).filter((b) => b && b.length === 10);
   if (!unique.length) return new Map();
+  const t0 = Date.now();
+  console.log(`[enrich] starting bulkEnrich for ${unique.length} BBLs (token=${TOKEN ? "yes" : "no"})`);
 
-  onProgress?.({ source: "acris", status: "started", message: "ACRIS sales and mortgages lookup started." });
-  let acris = new Map<string, Partial<EnrichmentBlob>>();
-  try {
-    acris = await fetchAcris(unique);
-    onProgress?.({
-      source: "acris",
-      status: "done",
-      message: `ACRIS complete. Found signals for ${acris.size.toLocaleString()} parcels.`,
-      parcelsWithData: acris.size,
-    });
-  } catch (e) {
-    console.error("ACRIS lookup failed:", e);
-    onProgress?.({ source: "acris", status: "failed", message: "ACRIS failed; continuing without it." });
+  async function runSource(
+    source: EnrichmentSource,
+    label: string,
+    fn: () => Promise<Map<string, Partial<EnrichmentBlob>>>
+  ): Promise<Map<string, Partial<EnrichmentBlob>>> {
+    onProgress?.({ source, status: "started", message: `${label} lookup started.` });
+    try {
+      const result = await fn();
+      onProgress?.({
+        source,
+        status: "done",
+        message: `${label} complete. Found signals for ${result.size.toLocaleString()} parcel${result.size === 1 ? "" : "s"}.`,
+        parcelsWithData: result.size,
+      });
+      return result;
+    } catch (e) {
+      console.error(`${label} failed:`, e);
+      onProgress?.({
+        source,
+        status: "failed",
+        message: `${label} failed; continuing with remaining sources.`,
+      });
+      return new Map();
+    }
   }
+
+  // Run sources in parallel
+  const [acris, jobs, dobV, hpdV] = await Promise.all([
+    runSource("acris", "ACRIS sales and mortgages", () => fetchAcris(unique)),
+    runSource("permits", "DOB jobs and permits", () => fetchDobJobs(unique)),
+    runSource("dobViolations", "DOB violations", () => fetchDobViolations(unique)),
+    runSource("hpdViolations", "HPD violations", () => fetchHpdViolations(unique)),
+  ]);
 
   const merged = new Map<string, EnrichmentBlob>();
   for (const bbl of unique) {
-    merged.set(bbl, { ...(acris.get(bbl) ?? {}) });
+    const e: EnrichmentBlob = {
+      ...(acris.get(bbl) ?? {}),
+      ...(jobs.get(bbl)  ?? {}),
+      ...(dobV.get(bbl)  ?? {}),
+      ...(hpdV.get(bbl)  ?? {}),
+    };
+    // Total open charges is open_dob_violations + open_hpd_violations as a rough count
+    e.open_charges_total =
+      (e.open_dob_violations ?? 0) + (e.open_hpd_violations ?? 0);
+    e.acris_multiple_liens = ((e.acris_tax_lien_count ?? 0) + (e.acris_lien_count ?? 0)) >= 2;
+    merged.set(bbl, e);
   }
+  const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+  const stats = {
+    withSale:    [...merged.values()].filter((e) => e.last_sale_date).length,
+    withMortg:   [...merged.values()].filter((e) => e.recent_mortgage_date).length,
+    withPermits: [...merged.values()].filter((e) => (e.recent_permits_2y ?? 0) > 0).length,
+    withDobV:    [...merged.values()].filter((e) => (e.open_dob_violations ?? 0) > 0).length,
+    withHpdV:    [...merged.values()].filter((e) => (e.open_hpd_violations ?? 0) > 0).length,
+    withAcrisDistress: [...merged.values()].filter((e) => (e.acris_distress_doc_count ?? 0) > 0).length,
+  };
+  console.log(`[enrich] DONE in ${elapsed}s. parcels=${unique.length}`, stats);
   return merged;
 }

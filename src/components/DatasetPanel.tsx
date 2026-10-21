@@ -123,12 +123,12 @@ export default function DatasetPanel({ activeDatasetId, onActivate, onDeleted }:
   async function handleEnrich() {
     if (!active) return;
     setBusy(true);
-    setStatus("Pulling ACRIS signals…");
+    setStatus("Pulling ACRIS, DOB, and HPD records…");
     try {
       const res = await fetch(`/api/datasets/${active.id}/enrich`, { method: "POST" });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error ?? "Enrichment failed");
-      setStatus(`ACRIS signals found for ${body.enriched.toLocaleString()} of ${body.total.toLocaleString()} parcels.`);
+      setStatus(`Signals found for ${body.enriched.toLocaleString()} of ${body.total.toLocaleString()} parcels.`);
       await loadDatasets();
     } catch (err) {
       setStatus(err instanceof Error ? err.message : "Enrichment failed");
@@ -182,7 +182,7 @@ export default function DatasetPanel({ activeDatasetId, onActivate, onDeleted }:
               disabled={busy}
               className="rounded border border-gray-700 px-3 py-1 text-sm hover:bg-gray-900 disabled:opacity-50"
             >
-              Enrich with ACRIS
+              Enrich with live signals
             </button>
             <button
               type="button"
