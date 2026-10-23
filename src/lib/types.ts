@@ -119,3 +119,18 @@ export interface Dataset {
   enriched_count?: number;
   last_enriched_at?: number | null;
 }
+
+export interface WatchlistItem {
+  bbl: string;
+  note: string;
+  added_at: number;
+  parcel: ParcelRow | null;
+}
+
+export interface ExploredItem {
+  bbl: string;
+  note: string;
+  explored_at: number;
+  parcel: ParcelRow | null;
+}
+

@@ -6,6 +6,9 @@ interface Props {
   loading: boolean;
   params: FilterParams;
   onSort: (sortBy: string) => void;
+  watchlistBbls: Set<string>;
+  onToggleWatchlist: (row: ParcelRow) => void;
+  onMarkExplored: (bbl: string, parcel: ParcelRow) => void;
 }
 
 const VERDICT_COLORS: Record<string, string> = {
@@ -59,7 +62,15 @@ function SortHeader({
   );
 }
 
-export default function ParcelTable({ rows, loading, params, onSort }: Props) {
+export default function ParcelTable({
+  rows,
+  loading,
+  params,
+  onSort,
+  watchlistBbls,
+  onToggleWatchlist,
+  onMarkExplored,
+}: Props) {
   if (!loading && rows.length === 0) {
     return <p className="px-4 py-10 text-center text-sm text-gray-500">No parcels match these filters.</p>;
   }
@@ -79,44 +90,66 @@ export default function ParcelTable({ rows, loading, params, onSort }: Props) {
                 align={col.align}
               />
             ))}
-            <th className="px-4 py-2 font-medium uppercase tracking-wide">BBL</th>
             <th className="px-4 py-2 font-medium uppercase tracking-wide">Verdict</th>
             <th className="px-4 py-2 font-medium uppercase tracking-wide">Note</th>
             <th className="px-4 py-2 font-medium uppercase tracking-wide">Research</th>
+            <th className="px-4 py-2 font-medium uppercase tracking-wide">Actions</th>
           </tr>
         </thead>
         <tbody className={loading ? "opacity-50" : undefined}>
-          {rows.map((row) => (
-            <tr key={row.bbl} className="border-b border-gray-900 hover:bg-gray-900/60">
-              <td className="px-4 py-2">
-                <div>{row.address ?? "—"}</div>
-                <div className="text-xs text-gray-500">{row.zonedist1 ?? "—"}</div>
-              </td>
-              <td className="px-4 py-2 text-right tabular-nums">{fmtNum(row.lotarea)}</td>
-              <td className="px-4 py-2 text-right tabular-nums">{fmtFar(row.residfar)}</td>
-              <td className="px-4 py-2 text-right tabular-nums">{fmtNum(row.unused_buildable_sf)}</td>
-              <td className="px-4 py-2 text-right tabular-nums font-medium">{row.opportunity_score}</td>
-              <td className="px-4 py-2 font-mono text-xs text-gray-400">{row.bbl}</td>
-              <td className="px-4 py-2">
-                <span className={`rounded border px-2 py-0.5 text-xs ${VERDICT_COLORS[row.verdict] ?? VERDICT_COLORS["Likely skip"]}`}>
-                  {row.verdict}
-                </span>
-              </td>
-              <td className="max-w-xs px-4 py-2 text-xs text-gray-400" title={row.short_developer_verdict ?? undefined}>
-                <span className="line-clamp-2">{row.short_developer_verdict ?? "—"}</span>
-              </td>
-              <td className="px-4 py-2">
-                <a
-                  href={generateAcrisBblSearchUrl(row.borough, row.block, row.lot)}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="text-xs text-sky-400 hover:underline"
-                >
-                  ACRIS
-                </a>
-              </td>
-            </tr>
-          ))}
+          {rows.map((row) => {
+            const saved = watchlistBbls.has(row.bbl);
+            return (
+              <tr key={row.bbl} className="border-b border-gray-900 hover:bg-gray-900/60">
+                <td className="px-4 py-2">
+                  <div>{row.address ?? "—"}</div>
+                  <div className="font-mono text-xs text-gray-500">
+                    {row.zonedist1 ?? "—"} · {row.bbl}
+                  </div>
+                </td>
+                <td className="px-4 py-2 text-right tabular-nums">{fmtNum(row.lotarea)}</td>
+                <td className="px-4 py-2 text-right tabular-nums">{fmtFar(row.residfar)}</td>
+                <td className="px-4 py-2 text-right tabular-nums">{fmtNum(row.unused_buildable_sf)}</td>
+                <td className="px-4 py-2 text-right tabular-nums font-medium">{row.opportunity_score}</td>
+                <td className="px-4 py-2">
+                  <span className={`rounded border px-2 py-0.5 text-xs ${VERDICT_COLORS[row.verdict] ?? VERDICT_COLORS["Likely skip"]}`}>
+                    {row.verdict}
+                  </span>
+                </td>
+                <td className="max-w-xs px-4 py-2 text-xs text-gray-400" title={row.short_developer_verdict ?? undefined}>
+                  <span className="line-clamp-2">{row.short_developer_verdict ?? "—"}</span>
+                </td>
+                <td className="px-4 py-2">
+                  <a
+                    href={generateAcrisBblSearchUrl(row.borough, row.block, row.lot)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-xs text-sky-400 hover:underline"
+                  >
+                    ACRIS
+                  </a>
+                </td>
+                <td className="px-4 py-2">
+                  <div className="flex gap-2">
+                    <button
+                      type="button"
+                      onClick={() => onToggleWatchlist(row)}
+                      className={`rounded border px-2 py-1 text-xs ${saved ? "border-amber-800 text-amber-300" : "border-gray-700 hover:bg-gray-800"}`}
+                    >
+                      {saved ? "★ Saved" : "☆ Save"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => onMarkExplored(row.bbl, row)}
+                      className="rounded border border-gray-700 px-2 py-1 text-xs hover:bg-gray-800"
+                    >
+                      Explored
+                    </button>
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>

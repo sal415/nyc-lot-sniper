@@ -14,6 +14,16 @@ const ALLOWED_SORTS = new Set([
 export async function filterParcels(params: FilterParams): Promise<QueryResult> {
   const supabase = getSupabase();
 
+  // Collect excluded BBLs from watchlist + explored
+  const [wl, ex] = await Promise.all([
+    supabase.from("watchlist").select("bbl"),
+    supabase.from("explored").select("bbl"),
+  ]);
+  const excludedBbls = [
+    ...(wl.data?.map((r) => r.bbl) ?? []),
+    ...(ex.data?.map((r) => r.bbl) ?? []),
+  ];
+
   const sortBy  = ALLOWED_SORTS.has(params.sortBy ?? "") ? params.sortBy! : "opportunity_score";
   const sortAsc = params.sortDir === "asc";
   const pageSize = Math.min(params.pageSize ?? 50, 200);
@@ -27,8 +37,14 @@ export async function filterParcels(params: FilterParams): Promise<QueryResult> 
     .not("residfar", "is", null);
 
   if (params.datasetId) q = q.eq("dataset_id", params.datasetId);
-  if (params.borough)   q = q.eq("borough", params.borough);
-  if (params.minScore != null) q = q.gte("opportunity_score", params.minScore);
+  if (excludedBbls.length > 0) q = q.not("bbl", "in", `(${excludedBbls.join(",")})`);
+  if (params.borough)         q = q.eq("borough", params.borough);
+  if (params.zonedist1)       q = q.eq("zonedist1", params.zonedist1);
+  if (params.bldgclass)       q = q.ilike("bldgclass", `${params.bldgclass}%`);
+  if (params.minLotArea != null)  q = q.gte("lotarea", params.minLotArea);
+  if (params.maxBuiltFar != null) q = q.lte("builtfar", params.maxBuiltFar);
+  if (params.minResidFar != null) q = q.gte("residfar", params.minResidFar);
+  if (params.minScore != null)    q = q.gte("opportunity_score", params.minScore);
   if (params.search) {
     const like = `%${params.search}%`;
     q = q.or(`address.ilike.${like},bbl.ilike.${like},ownername.ilike.${like}`);

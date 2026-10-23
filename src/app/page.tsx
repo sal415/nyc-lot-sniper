@@ -1,26 +1,34 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import DatasetPanel from "@/components/DatasetPanel";
 import FilterPanel from "@/components/FilterPanel";
 import ParcelTable from "@/components/ParcelTable";
+import WatchlistPanel from "@/components/WatchlistPanel";
 import type { FilterParams, ParcelRow } from "@/lib/types";
 
 const ACTIVE_DATASET_KEY = "activeDatasetId";
+
+type Tab = "queue" | "watchlist" | "explored";
 
 const DEFAULT_PARAMS: FilterParams = {
   sortBy: "opportunity_score",
   sortDir: "desc",
   pageSize: 50,
+  hideExplored: true,
 };
 
 export default function Dashboard() {
   const [activeDatasetId, setActiveDatasetId] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("queue");
   const [params, setParams] = useState<FilterParams>(DEFAULT_PARAMS);
   const [rows, setRows] = useState<ParcelRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [watchlistBbls, setWatchlistBbls] = useState<Set<string>>(new Set());
+  const [exploredCount, setExploredCount] = useState(0);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     try {
@@ -30,6 +38,19 @@ export default function Dashboard() {
       /* storage unavailable */
     }
   }, []);
+
+  const loadSavedState = useCallback(async () => {
+    const [wl, ex] = await Promise.all([
+      fetch("/api/watchlist").then((r) => r.json()),
+      fetch("/api/explored").then((r) => r.json()),
+    ]);
+    setWatchlistBbls(new Set((wl.items ?? []).map((i: { bbl: string }) => i.bbl)));
+    setExploredCount((ex.items ?? []).length);
+  }, []);
+
+  useEffect(() => {
+    loadSavedState();
+  }, [loadSavedState, refreshKey]);
 
   useEffect(() => {
     if (!activeDatasetId) {
@@ -72,7 +93,7 @@ export default function Dashboard() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activeDatasetId, params]);
+  }, [activeDatasetId, params, refreshKey]);
 
   function handleSort(sortBy: string) {
     setParams((prev) => ({
@@ -82,6 +103,48 @@ export default function Dashboard() {
       page: 1,
     }));
   }
+
+  async function handleToggleWatchlist(row: ParcelRow) {
+    if (watchlistBbls.has(row.bbl)) {
+      await fetch(`/api/watchlist/${row.bbl}`, { method: "DELETE" });
+    } else {
+      await fetch("/api/watchlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ bbl: row.bbl, parcel: row }),
+      });
+    }
+    setRefreshKey((k) => k + 1);
+  }
+
+  async function handleMarkExplored(bbl: string, parcel: ParcelRow | null) {
+    await fetch("/api/explored", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bbl, parcel }),
+    });
+    setRefreshKey((k) => k + 1);
+  }
+
+  async function handleRemoveWatchlist(bbl: string) {
+    await fetch(`/api/watchlist/${bbl}`, { method: "DELETE" });
+    setRefreshKey((k) => k + 1);
+  }
+
+  async function handleRestoreExplored(bbl: string) {
+    await fetch(`/api/explored/${bbl}`, { method: "DELETE" });
+    setRefreshKey((k) => k + 1);
+  }
+
+  const tabBtn = (id: Tab, label: string) => (
+    <button
+      type="button"
+      onClick={() => setTab(id)}
+      className={`rounded-md px-3 py-1.5 text-sm ${tab === id ? "bg-gray-800 text-gray-100" : "text-gray-400 hover:text-gray-200"}`}
+    >
+      {label}
+    </button>
+  );
 
   return (
     <main className="mx-auto w-full max-w-7xl flex-1 space-y-6 px-4 py-8">
@@ -95,29 +158,59 @@ export default function Dashboard() {
         onActivate={(id) => setActiveDatasetId(id || null)}
       />
 
-      {activeDatasetId && <FilterPanel params={params} onChange={setParams} />}
+      <nav className="flex gap-1 border-b border-gray-800 pb-2">
+        {tabBtn("queue", "Queue")}
+        {tabBtn("watchlist", `Watchlist (${watchlistBbls.size})`)}
+        {tabBtn("explored", `Explored (${exploredCount})`)}
+      </nav>
 
-      {error && (
-        <div className="rounded border border-red-900 bg-red-950/40 px-4 py-3 text-sm text-red-300">
-          {error}
-        </div>
+      {tab === "queue" && (
+        <>
+          {activeDatasetId && <FilterPanel params={params} onChange={setParams} />}
+
+          {error && (
+            <div className="rounded border border-red-900 bg-red-950/40 px-4 py-3 text-sm text-red-300">
+              {error}
+            </div>
+          )}
+
+          <section className="rounded-lg border border-gray-800 bg-gray-950">
+            <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
+              <h2 className="text-sm font-medium">Queue</h2>
+              <span className="text-xs text-gray-500">
+                {loading ? "Loading…" : `${total.toLocaleString()} match`}
+              </span>
+            </div>
+            {activeDatasetId ? (
+              <ParcelTable
+                rows={rows}
+                loading={loading}
+                params={params}
+                onSort={handleSort}
+                watchlistBbls={watchlistBbls}
+                onToggleWatchlist={handleToggleWatchlist}
+                onMarkExplored={(bbl, row) => handleMarkExplored(bbl, row)}
+              />
+            ) : (
+              <p className="px-4 py-10 text-center text-sm text-gray-500">
+                Upload a PLUTO CSV to get started.
+              </p>
+            )}
+          </section>
+        </>
       )}
 
-      <section className="rounded-lg border border-gray-800 bg-gray-950">
-        <div className="flex items-center justify-between border-b border-gray-800 px-4 py-3">
-          <h2 className="text-sm font-medium">Parcels</h2>
-          <span className="text-xs text-gray-500">
-            {loading ? "Loading…" : `${total.toLocaleString()} match`}
-          </span>
-        </div>
-        {activeDatasetId ? (
-          <ParcelTable rows={rows} loading={loading} params={params} onSort={handleSort} />
-        ) : (
-          <p className="px-4 py-10 text-center text-sm text-gray-500">
-            Upload a PLUTO CSV to get started.
-          </p>
-        )}
-      </section>
+      {tab !== "queue" && (
+        <section className="rounded-lg border border-gray-800 bg-gray-950">
+          <WatchlistPanel
+            view={tab}
+            refreshKey={refreshKey}
+            onMarkExplored={handleMarkExplored}
+            onRemoveWatchlist={handleRemoveWatchlist}
+            onRestoreExplored={handleRestoreExplored}
+          />
+        </section>
+      )}
     </main>
   );
 }

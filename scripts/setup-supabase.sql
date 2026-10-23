@@ -61,3 +61,16 @@ create index if not exists idx_parcels_dataset_bbl
   on parcels(dataset_id, bbl);
 create index if not exists idx_parcels_borough
   on parcels(dataset_id, borough);
+
+create table if not exists watchlist (
+  bbl          text primary key,
+  note         text default '',
+  added_at     timestamptz default now(),
+  parcel_data  jsonb
+);
+
+create table if not exists explored (
+  bbl          text primary key,
+  explored_at  timestamptz default now(),
+  parcel_data  jsonb
+);
