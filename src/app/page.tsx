@@ -92,15 +92,7 @@ export default function Dashboard() {
 
       <DatasetPanel
         activeDatasetId={activeDatasetId}
-        onActivate={(id) => setActiveDatasetId(id)}
-        onDeleted={() => {
-          setActiveDatasetId(null);
-          try {
-            localStorage.removeItem(ACTIVE_DATASET_KEY);
-          } catch {
-            /* storage unavailable */
-          }
-        }}
+        onActivate={(id) => setActiveDatasetId(id || null)}
       />
 
       {activeDatasetId && <FilterPanel params={params} onChange={setParams} />}

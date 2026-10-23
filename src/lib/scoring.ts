@@ -1,11 +1,19 @@
 import { RawParcel, Parcel } from "./types";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// NYC Development Opportunity Scoring
+// NYC Development Opportunity Scoring — v2
 //
-// Raw 0–100 score from weighted dimensions, minus hard caps for blockers and
-// plus targeted boosts. A dataset-relative percentile rank maps the raw score
-// to the final label. Every threshold lives in CONFIG below.
+// Two-layer model:
+//   Layer 1: raw 0–100 score from six weighted dimensions (additive sub-scores
+//            + multiplicative caps for hard blockers + targeted boosts).
+//   Layer 2: dataset-relative percentile rank → final label.
+//
+// Calibrated against the actual Queens R6/R6A/R7A dataset distribution; the
+// enrichment dimensions (ACRIS/DOB/HPD/liens) are wired as live functions so
+// they activate automatically when the optional `enrichment` blob is supplied.
+// Without enrichment, those dimensions return 0 and emit a missing-data flag.
+//
+// Every threshold lives in CONFIG below — tune there, not in the logic.
 // ─────────────────────────────────────────────────────────────────────────────
 
 export const CONFIG = {
@@ -18,6 +26,7 @@ export const CONFIG = {
     actionability:         20, // building class
     zoning:                10,
     acquisition_friction:  10,
+    enrichment_signals:     5, // distress + market + assemblage; stub=0
   },
 
   // Layer 2 percentile cutoffs — tuned to deliver ~6% Strong on this dataset
@@ -253,6 +262,7 @@ export function calculateParcelMetrics(p: RawParcel): ParcelMetrics {
 }
 // Keep old name as alias.
 export const calculateMetrics = calculateParcelMetrics;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Scoring context — accumulator for factors/missing flags
 // ─────────────────────────────────────────────────────────────────────────────
@@ -391,7 +401,9 @@ export function scoreZoning(
 }
 
 /**
- * Acquisition-friction proxy from PLUTO fields (owner type, owner name, tenure).
+ * Acquisition-friction proxy from PLUTO alone.
+ * Real signals (recent sale to LLC, recent mortgage, active DOB jobs) require
+ * enrichment — those are scored in scoreEnrichmentSignals.
  */
 export function scoreAcquisitionLikelihood(
   p: RawParcel, m: ParcelMetrics, c: ScoringContext
@@ -438,6 +450,12 @@ export function scoreAcquisitionLikelihood(
   return Math.min(Math.max(s, 0), CONFIG.WEIGHTS.acquisition_friction);
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Enrichment-driven scorers — read optional enrichment blob.
+// When absent: return 0 and emit missing-data flags so the user knows what's
+// not yet wired in.
+// ─────────────────────────────────────────────────────────────────────────────
+
 export interface EnrichmentBlob {
   // ACRIS
   last_sale_date?: string | null;       // ISO
@@ -467,12 +485,81 @@ export interface EnrichmentBlob {
   adjacent_underbuilt_count?: number | null;
 }
 
+export function scoreDistress(
+  p: RawParcel, e: EnrichmentBlob | null, c: ScoringContext
+): number {
+  if (!e) {
+    c.missing.push("DOB violations");
+    c.missing.push("HPD violations");
+    c.missing.push("tax lien status");
+    return 0;
+  }
+  let s = 0;
+  if ((e.open_dob_violations ?? 0) >= 3) { s += 1; c.positive.push(`${e.open_dob_violations} open DOB violations`); }
+  if ((e.open_hpd_violations ?? 0) >= 5) { s += 1; c.positive.push(`${e.open_hpd_violations} open HPD violations`); }
+  if (e.in_tax_lien_sale)               { s += 1; c.positive.push("On tax lien sale list — distressed owner"); }
+  if ((e.open_charges_total ?? 0) >= 5000) { s += 1; c.positive.push(`$${(e.open_charges_total ?? 0).toLocaleString()} in open charges`); }
+  if ((e.acris_tax_lien_count ?? 0) > 0) {
+    s += 1;
+    c.positive.push(`${e.acris_tax_lien_count} ACRIS tax lien filing${e.acris_tax_lien_count === 1 ? "" : "s"}`);
+  }
+  if ((e.acris_lis_pendens_count ?? 0) > 0 || (e.acris_foreclosure_count ?? 0) > 0) {
+    s += 2;
+    const filings = [
+      (e.acris_lis_pendens_count ?? 0) > 0 ? `${e.acris_lis_pendens_count} lis pendens` : null,
+      (e.acris_foreclosure_count ?? 0) > 0 ? `${e.acris_foreclosure_count} foreclosure filing${e.acris_foreclosure_count === 1 ? "" : "s"}` : null,
+    ].filter(Boolean).join(" / ");
+    c.positive.push(`ACRIS legal distress: ${filings}`);
+  }
+  if (e.acris_multiple_liens) {
+    s += 1;
+    c.positive.push("Multiple ACRIS lien filings");
+  }
+  return Math.min(s, 5);
+}
+
+export function scoreMarketSupport(
+  p: RawParcel, e: EnrichmentBlob | null, c: ScoringContext
+): number {
+  if (!e) {
+    c.missing.push("nearby comps / market $/sf");
+    return 0;
+  }
+  // Without a real comp set we just give a small bump if available
+  if ((e.nearby_sales_median_psf ?? 0) > 600) { c.positive.push("Strong nearby $/SF"); return 1; }
+  return 0;
+}
+
+export function scoreAssemblage(
+  p: RawParcel, e: EnrichmentBlob | null, c: ScoringContext
+): number {
+  if (!e) {
+    c.missing.push("adjacent-lot ownership / assemblage");
+    return 0;
+  }
+  let s = 0;
+  if ((e.same_owner_adjacent_count ?? 0) >= 1) { s += 1; c.positive.push("Same owner controls adjacent lot(s)"); }
+  if ((e.adjacent_underbuilt_count ?? 0) >= 2) { s += 1; c.positive.push("Multiple underbuilt neighbors — assemblage potential"); }
+  return Math.min(s, 2);
+}
+
+/** Combined enrichment dimension. Caps at WEIGHTS.enrichment_signals. */
+export function scoreEnrichmentSignals(
+  p: RawParcel, e: EnrichmentBlob | null, c: ScoringContext
+): number {
+  // Acquisition friction from enrichment (penalties only — handled via caps below)
+  const distress = scoreDistress(p, e, c);
+  const market   = scoreMarketSupport(p, e, c);
+  const assem    = scoreAssemblage(p, e, c);
+  return Math.min(distress + market + assem, CONFIG.WEIGHTS.enrichment_signals);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Penalties: hard caps for blockers + targeted boosts for compounding wins
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function applyPenalties(
-  p: RawParcel, m: ParcelMetrics,
+  p: RawParcel, m: ParcelMetrics, e: EnrichmentBlob | null,
   rawScore: number, c: ScoringContext
 ): number {
   let cap = 100;
@@ -523,6 +610,31 @@ export function applyPenalties(
     cap = Math.min(cap, CONFIG.CAPS.AWKWARD_SHAPE);
   }
 
+  // Enrichment-driven caps
+  if (e) {
+    if ((e.active_dob_jobs ?? 0) >= 1) {
+      cap = Math.min(cap, 30);
+      c.negative.push(`${e.active_dob_jobs} active DOB job(s) — likely already in development`);
+    }
+    if ((e.recent_permits_2y ?? 0) >= 3) {
+      cap = Math.min(cap, 35);
+      c.negative.push(`${e.recent_permits_2y} permits in last 2y — active project`);
+    }
+    if (e.last_sale_to_llc && e.last_sale_date) {
+      const saleYear = parseInt(e.last_sale_date.slice(0, 4));
+      if (CONFIG.CURRENT_YEAR - saleYear <= 3) {
+        cap = Math.min(cap, 40);
+        c.negative.push(`Recently sold to LLC (${e.last_sale_date}) — likely developer-acquired`);
+      }
+    }
+    if (e.recent_mortgage_amount && e.recent_mortgage_amount >= 5_000_000 && e.recent_mortgage_date) {
+      const mYear = parseInt(e.recent_mortgage_date.slice(0, 4));
+      if (CONFIG.CURRENT_YEAR - mYear <= 2) {
+        cap = Math.min(cap, 45);
+        c.negative.push(`Recent large mortgage ($${(e.recent_mortgage_amount/1e6).toFixed(1)}M) — likely active project`);
+      }
+    }
+  }
 
   s = Math.min(s, cap);
 
@@ -584,6 +696,10 @@ export function generateScoreReasons(
   return `Limited upside on ${zone} — likely skip.`;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level scorer
+// ─────────────────────────────────────────────────────────────────────────────
+
 export interface ScoredParcel {
   raw_score: number;
   positive_factors: string[];
@@ -594,17 +710,22 @@ export interface ScoredParcel {
   key_factors: string[];
 }
 
-export function scoreParcel(p: RawParcel, m: ParcelMetrics): ScoredParcel {
+export function scoreParcel(
+  p: RawParcel,
+  m: ParcelMetrics,
+  enrichment: EnrichmentBlob | null = null
+): ScoredParcel {
   const c = ctx();
 
-  const subtotal =
-    scoreDevelopmentUpside(p, m, c) +
-    scoreFeasibility(p, m, c) +
-    scoreActionability(p, m, c) +
-    scoreZoning(p, m, c) +
-    scoreAcquisitionLikelihood(p, m, c);
+  const upside  = scoreDevelopmentUpside(p, m, c);
+  const feas    = scoreFeasibility(p, m, c);
+  const action  = scoreActionability(p, m, c);
+  const zoning  = scoreZoning(p, m, c);
+  const acq     = scoreAcquisitionLikelihood(p, m, c);
+  const enrich  = scoreEnrichmentSignals(p, enrichment, c);
 
-  const final = applyPenalties(p, m, subtotal, c);
+  const subtotal = upside + feas + action + zoning + acq + enrich;
+  const final    = applyPenalties(p, m, enrichment, subtotal, c);
 
   return {
     raw_score: final,
