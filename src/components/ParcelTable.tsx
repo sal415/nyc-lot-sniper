@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { FilterParams, ParcelRow } from "@/lib/types";
 import { generateAcrisBblSearchUrl } from "@/lib/links";
 
@@ -102,7 +103,7 @@ export default function ParcelTable({
             return (
               <tr key={row.bbl} className="border-b border-gray-900 hover:bg-gray-900/60">
                 <td className="px-4 py-2">
-                  <div>{row.address ?? "—"}</div>
+                  <Link href={`/parcels/${row.bbl}`} className="hover:underline">{row.address ?? "—"}</Link>
                   <div className="font-mono text-xs text-gray-500">
                     {row.zonedist1 ?? "—"} · {row.bbl}
                   </div>

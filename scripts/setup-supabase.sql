@@ -74,3 +74,5 @@ create table if not exists explored (
   explored_at  timestamptz default now(),
   parcel_data  jsonb
 );
+alter table parcels add column if not exists scrape_summary jsonb;
+alter table parcels add column if not exists scraped_at bigint;

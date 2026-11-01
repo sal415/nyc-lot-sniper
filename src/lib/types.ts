@@ -85,6 +85,8 @@ export interface ParcelRow {
   verdict: string;
   enrichment_data: string | null;
   enriched_at: number | null;
+  scrape_summary: string | null;
+  scraped_at: number | null;
 }
 
 export interface ResearchLinks {
