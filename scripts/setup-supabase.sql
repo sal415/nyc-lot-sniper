@@ -76,3 +76,5 @@ create table if not exists explored (
 );
 alter table parcels add column if not exists scrape_summary jsonb;
 alter table parcels add column if not exists scraped_at bigint;
+alter table parcels add column if not exists ai_report jsonb;
+alter table parcels add column if not exists ai_report_generated_at bigint;

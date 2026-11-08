@@ -87,6 +87,8 @@ export interface ParcelRow {
   enriched_at: number | null;
   scrape_summary: string | null;
   scraped_at: number | null;
+  ai_report: string | null;
+  ai_report_generated_at: number | null;
 }
 
 export interface ResearchLinks {
@@ -136,3 +138,47 @@ export interface ExploredItem {
   parcel: ParcelRow | null;
 }
 
+
+export interface AIPacket {
+  address: string | null;
+  bbl: string;
+  borough: string | null;
+  block: string | null;
+  lot: string | null;
+  zoning: string | null;
+  building_class: string | null;
+  owner: string | null;
+  lot_area: number | null;
+  lot_frontage: number | null;
+  lot_depth: number | null;
+  built_far: number | null;
+  residential_far: number | null;
+  commercial_far?: number | null;
+  facility_far?: number | null;
+  year_built?: number | null;
+  year_altered_1?: number | null;
+  year_altered_2?: number | null;
+  overlay1?: string | null;
+  overlay2?: string | null;
+  max_buildable_sf: number | null;
+  existing_built_sf: number | null;
+  unused_buildable_sf: number | null;
+  underbuilt_ratio: number | null;
+  opportunity_score: number;
+  score_reasons: string[];
+  verdict: string;
+  research_links: ResearchLinks;
+  enrichment?: import("./scraper").EnrichmentResult | null;
+  bulk_enrichment?: import("./scoring").EnrichmentBlob | null;
+}
+
+export interface AIReport {
+  recommendation: "Strong acquisition candidate" | "Worth pursuing" | "Low probability deal" | "Likely skip";
+  confidence: number;
+  why: string[];
+  risks: string[];
+  opportunityType: "Vacant development site" | "Teardown candidate" | "Assemblage opportunity" | "Air rights / underbuilt multifamily" | "Low-quality opportunity";
+  acquisitionStrategy: string;
+  generatedAt: number;
+  model: string;
+}

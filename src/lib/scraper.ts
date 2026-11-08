@@ -1,6 +1,7 @@
 import { parse } from "node-html-parser";
 import { generateAcrisBblSearchUrl } from "./links";
 import { AcrisDistressSignal, acrisDistressLabel, classifyAcrisDistress } from "./acrisDistress";
+import { fetchRecentPropertyNews, PropertyNewsContext } from "./propertyNews";
 
 const BOROUGH_CODE: Record<string, string> = {
   MN: "1", BX: "2", BK: "3", QN: "4", SI: "5",
@@ -1019,6 +1020,7 @@ export interface EnrichmentResult {
   distress: DistressContext | null;
   regulatory: RegulatoryContext | null;
   development: DevelopmentMomentumContext | null;
+  recentNews: PropertyNewsContext | null;
   summary: string;
   scrapedAt: number;
 }
@@ -1038,14 +1040,22 @@ export async function enrichParcel(
   ]);
 
   const nearby = await scrapeNearbyContext(zola?.latitude ?? null, zola?.longitude ?? null);
-  const [market, assemblage, distress, regulatory, development] = await Promise.all([
+  const [market, assemblage, distress, regulatory, development, recentNews] = await Promise.all([
     scrapeMarketContext(borough, block, lot, zola?.latitude ?? null, zola?.longitude ?? null),
     scrapeAssemblageContext(borough, block, lot, owner),
     scrapeDistressContext(borough, block, lot),
     scrapeRegulatoryContext(borough, block, lot, dob?.numberOfUnits ?? null),
     scrapeDevelopmentMomentumContext(borough, zola?.latitude ?? null, zola?.longitude ?? null),
+    fetchRecentPropertyNews({
+      address,
+      bbl: `${boroughCode(borough)}${padBlock(block)}${padLot(lot)}`,
+      borough,
+      block,
+      lot,
+      owner,
+    }),
   ]);
-  const summary = buildSummary({ acris, dob, zola, nearby, market, assemblage, distress, regulatory, development, address });
+  const summary = buildSummary({ acris, dob, zola, nearby, market, assemblage, distress, regulatory, development, recentNews, address });
 
   return {
     acris,
@@ -1057,6 +1067,7 @@ export async function enrichParcel(
     distress,
     regulatory,
     development,
+    recentNews,
     summary,
     scrapedAt: Date.now(),
   };
@@ -1657,6 +1668,7 @@ function buildSummary({
   distress,
   regulatory,
   development,
+  recentNews,
   address,
 }: {
   acris: AcrisData | null;
@@ -1668,6 +1680,7 @@ function buildSummary({
   distress: DistressContext | null;
   regulatory: RegulatoryContext | null;
   development: DevelopmentMomentumContext | null;
+  recentNews: PropertyNewsContext | null;
   address: string | null;
 }): string {
   const lines: string[] = [];
@@ -1808,6 +1821,19 @@ function buildSummary({
     }
   }
 
+  if (recentNews) {
+    if (recentNews.articles.length > 0) {
+      lines.push(`Recent property news/public activity: ${recentNews.articles.length} relevant item(s) found`);
+      for (const article of recentNews.articles.slice(0, 3)) {
+        const date = article.publishedDate ?? "date unknown";
+        lines.push(`News signal: ${date} - ${article.title} (${article.signalType}, ${article.relevance} relevance)`);
+      }
+    } else if (recentNews.sourceNotes.length > 0) {
+      lines.push(`Recent property news/public activity: unavailable (${recentNews.sourceNotes[0]})`);
+    } else {
+      lines.push("Recent property news/public activity: no property-specific items found");
+    }
+  }
 
   return lines.join("\n");
 }
