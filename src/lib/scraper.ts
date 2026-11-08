@@ -750,87 +750,277 @@ function formatDobDate(value: string | null): string | null {
 
 // ── ZoLa / NYC Planning Labs API ─────────────────────────────────────────────
 
+export interface ZolaData {
+  zoningDistrict: string | null;
+  overlays: string | null;
+  specialPurposeDistrict: string | null;
+  landmarkStatus: string | null;
+  floodZone: string | null;
+  historicDistrict: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  parcelAddress: string | null;
+  rawApiData: Record<string, unknown> | null;
+  sourceUrl: string;
+}
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Parcel-level enrichment: ACRIS + DOB for a single lot
-// ─────────────────────────────────────────────────────────────────────────────
+export interface NearbyPlace {
+  name: string;
+  category: string;
+  distanceMeters: number;
+  distanceMiles: number;
+  detail: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  sourceUrl: string;
+}
+
+export interface NearbyContext {
+  transit: NearbyPlace[];
+  schools: NearbyPlace[];
+  sourceNotes: string[];
+}
+
+export interface SaleComp {
+  bbl: string | null;
+  address: string | null;
+  neighborhood: string | null;
+  buildingClassCategory: string | null;
+  salePrice: number | null;
+  saleDate: string | null;
+  landSquareFeet: number | null;
+  grossSquareFeet: number | null;
+  pricePerLandSf: number | null;
+  distanceMiles: number | null;
+}
+
+export interface TaxAssessment {
+  taxClass: string | null;
+  buildingClass: string | null;
+  marketValue: number | null;
+  assessedTotal: number | null;
+  assessedLand: number | null;
+  exemptionTotal: number | null;
+  year: string | null;
+  period: string | null;
+  sourceUrl: string;
+}
+
+export interface MarketContext {
+  assessment: TaxAssessment | null;
+  subjectSales: SaleComp[];
+  nearbySales: SaleComp[];
+  medianNearbyPricePerLandSf: number | null;
+  sourceNotes: string[];
+}
+
+export interface AssemblageParcel {
+  bbl: string;
+  address: string | null;
+  owner: string | null;
+  lotArea: number | null;
+  builtFar: number | null;
+  residFar: number | null;
+  zoning: string | null;
+  estimatedUnusedBuildableSf: number | null;
+}
+
+export interface AssemblageContext {
+  sameOwnerSameBlock: AssemblageParcel[];
+  immediateNeighbors: AssemblageParcel[];
+  sameBlockUnderbuilt: AssemblageParcel[];
+  potentialCombinedLotArea: number | null;
+  potentialCombinedUnusedSf: number | null;
+  sourceUrl: string;
+  sourceNotes: string[];
+}
+
+export interface DistressCharge {
+  code: string | null;
+  accountType: string | null;
+  balance: number | null;
+  liability: number | null;
+  dueDate: string | null;
+  taxYear: string | null;
+}
+
+export interface DistressContext {
+  openChargeBalance: number | null;
+  charges: DistressCharge[];
+  hasOpenCharges: boolean;
+  sourceUrl: string;
+  sourceNotes: string[];
+}
+
+export interface HpdRegistration {
+  registrationId: string | null;
+  buildingId: string | null;
+  lastRegistrationDate: string | null;
+  registrationEndDate: string | null;
+  contacts: string[];
+}
+
+export interface RegulatoryContext {
+  hpdRegistration: HpdRegistration | null;
+  isHpdRegistered: boolean;
+  registrationRiskNote: string | null;
+  sourceUrl: string;
+  sourceNotes: string[];
+}
+
+export interface DevelopmentJob {
+  jobNumber: string | null;
+  address: string | null;
+  jobType: string | null;
+  status: string | null;
+  latestActionDate: string | null;
+  proposedStories: number | null;
+  proposedDwellingUnits: number | null;
+  constructionFloorArea: number | null;
+  distanceMiles: number | null;
+}
+
+export interface DevelopmentMomentumContext {
+  nearbyJobs: DevelopmentJob[];
+  activeNearbyJobs: number;
+  totalProposedUnits: number | null;
+  largestNearbyJob: DevelopmentJob | null;
+  sourceUrl: string;
+  sourceNotes: string[];
+}
+
+export async function scrapeZola(
+  borough: string | null,
+  block: string | null,
+  lot: string | null
+): Promise<ZolaData | null> {
+  const bcode = boroughCode(borough);
+  const bl = (block ?? "0").trim().replace(/^0+/, "") || "0";
+  const l = (lot ?? "0").trim().replace(/^0+/, "") || "0";
+  const bbl = `${bcode}${bl.padStart(5, "0")}${l.padStart(4, "0")}`;
+
+  const zolaUrl = `https://zola.planning.nyc.gov/lot/${bcode}/${bl}/${l}`;
+
+  // ZoLa's current app reads parcel facts from CARTO's dcp_mappluto table.
+  // The previous /api/lot route now serves the HTML app shell instead of JSON.
+  const sql = `
+    SELECT address, bbl, borocode, borough, block, lot,
+      ownername, bldgclass, lotarea, builtfar, residfar, commfar, facilfar, yearbuilt,
+      zonedist1, zonedist2, zonedist3, zonedist4,
+      overlay1, overlay2,
+      spdist1, spdist2, spdist3,
+      histdist, landmark,
+      ST_Y(ST_Centroid(the_geom)) as latitude,
+      ST_X(ST_Centroid(the_geom)) as longitude
+    FROM dcp_mappluto
+    WHERE bbl=${bbl}
+  `;
+
+  const rawData = await fetchCartoRows(sql);
+  const row = rawData?.rows?.[0] ?? null;
+
+  if (row) {
+    return {
+      zoningDistrict: joinFields(row, "zonedist1", "zonedist2", "zonedist3", "zonedist4"),
+      overlays: joinFields(row, "overlay1", "overlay2"),
+      specialPurposeDistrict: joinFields(row, "spdist1", "spdist2", "spdist3"),
+      landmarkStatus: strField(row, "landmark"),
+      floodZone: null,
+      historicDistrict: strField(row, "histdist"),
+      latitude: numField(row, "latitude"),
+      longitude: numField(row, "longitude"),
+      parcelAddress: strField(row, "address"),
+      rawApiData: rawData,
+      sourceUrl: zolaUrl,
+    };
+  }
+
+  // Fallback: try the NYC GeoSearch API for basic lot confirmation
+  const geoUrl = `https://geosearch.planninglabs.nyc/v2/search?text=BBL+${bcode}${padBlock(block)}${padLot(lot)}`;
+  let geoData: Record<string, unknown> | null = null;
+  try {
+    const res = await fetch(geoUrl, { headers: { Accept: "application/json" } });
+    if (res.ok) geoData = await res.json() as Record<string, unknown>;
+  } catch {
+    geoData = null;
+  }
+
+  // Even if both API calls fail, return a stub so the UI knows it was attempted
+  return {
+    zoningDistrict: null,
+    overlays: null,
+    specialPurposeDistrict: null,
+    landmarkStatus: null,
+    floodZone: null,
+    historicDistrict: null,
+    latitude: null,
+    longitude: null,
+    parcelAddress: null,
+    rawApiData: geoData,
+    sourceUrl: zolaUrl,
+  };
+}
+
+async function fetchCartoRows(sql: string): Promise<{ rows: Record<string, unknown>[] } | null> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    const q = encodeURIComponent(sql.replace(/\s+/g, " ").trim());
+    const res = await fetch(`https://planninglabs.carto.com/api/v2/sql?q=${q}&format=json`, {
+      signal: ctrl.signal,
+      headers: { Accept: "application/json" },
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json() as { rows?: Record<string, unknown>[] };
+    return Array.isArray(data.rows) ? { rows: data.rows } : null;
+  } catch {
+    return null;
+  }
+}
+
+function strField(obj: Record<string, unknown>, ...keys: string[]): string | null {
+  for (const k of keys) {
+    // case-insensitive key lookup
+    const matchKey = Object.keys(obj).find(
+      (ok) => ok.toLowerCase() === k.toLowerCase()
+    );
+    if (matchKey && obj[matchKey] != null && obj[matchKey] !== "") {
+      return String(obj[matchKey]);
+    }
+  }
+  return null;
+}
+
+function numField(obj: Record<string, unknown>, ...keys: string[]): number | null {
+  const value = strField(obj, ...keys);
+  if (value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function joinFields(obj: Record<string, unknown>, ...keys: string[]): string | null {
+  const values = keys
+    .map((key) => strField(obj, key))
+    .filter((value): value is string => Boolean(value));
+
+  return values.length > 0 ? values.join(", ") : null;
+}
+
+// ── Full enrichment ───────────────────────────────────────────────────────────
 
 export interface EnrichmentResult {
   acris: AcrisData | null;
   dob: DobData | null;
+  zola: ZolaData | null;
+  nearby: NearbyContext | null;
+  market: MarketContext | null;
+  assemblage: AssemblageContext | null;
+  distress: DistressContext | null;
+  regulatory: RegulatoryContext | null;
+  development: DevelopmentMomentumContext | null;
   summary: string;
   scrapedAt: number;
-}
-
-function buildSummary({
-  acris,
-  dob,
-  address,
-}: {
-  acris: AcrisData | null;
-  dob: DobData | null;
-  address: string | null;
-}): string {
-  const lines: string[] = [];
-
-  if (address) lines.push(`Property: ${address}`);
-
-  if (acris) {
-    if (acris.lastSaleDate && acris.lastSaleAmount) {
-      lines.push(`Last sale: ${acris.lastSaleDate} — ${acris.lastSaleAmount} (${acris.lastSaleGrantor ?? "?"} → ${acris.lastSaleGrantee ?? "?"})`);
-    } else if (acris.lastSaleDate) {
-      lines.push(`Last deed: ${acris.lastSaleDate} (${acris.lastSaleGrantor ?? "?"} → ${acris.lastSaleGrantee ?? "?"})`);
-    }
-    if (acris.lastMortgageDate) {
-      lines.push(`Last mortgage: ${acris.lastMortgageDate}${acris.lastMortgageAmount ? ` — ${acris.lastMortgageAmount}` : ""}`);
-    }
-    if (acris.distressSignals.length > 0) {
-      const counts = [
-        acris.taxLienCount ? `${acris.taxLienCount} tax lien` : null,
-        acris.lienCount > acris.taxLienCount ? `${acris.lienCount} lien/judgment` : null,
-        acris.lisPendensCount ? `${acris.lisPendensCount} lis pendens` : null,
-        acris.foreclosureCount ? `${acris.foreclosureCount} foreclosure` : null,
-      ].filter(Boolean).join(", ");
-      lines.push(`ACRIS distress filings: ${counts || `${acris.distressSignals.length} filing(s)`}${acris.latestDistressDate ? `; latest ${acris.latestDistressDate}` : ""}`);
-    }
-    lines.push(`ACRIS documents on file: ${acris.totalDocuments}`);
-  } else {
-    lines.push("ACRIS: could not retrieve data");
-  }
-
-  if (dob) {
-    const dobParts: string[] = [];
-    const floors = positiveNumberText(dob.numberOfFloors);
-    const units = positiveNumberText(dob.numberOfUnits);
-    if (floors) dobParts.push(`${floors} floors`);
-    if (units) dobParts.push(`${units} units`);
-    if (dobParts.length > 0) lines.push(`DOB profile: ${dobParts.join(", ")}`);
-    if (dob.openViolations != null) {
-      lines.push(`Open violations: ${dob.openViolations}`);
-    }
-    if (dob.activeJobs) lines.push(`Active jobs/permits: ${dob.activeJobs}`);
-    if (dob.lastPermitDate) lines.push(`Last DOB permit: ${dob.lastPermitDate}`);
-    if (dob.certificatesOfOccupancy.length > 0) {
-      const co = dob.certificatesOfOccupancy[0];
-      lines.push(`Certificate of occupancy: ${[co.issueType, co.issueDate, co.status].filter(Boolean).join(" | ")}`);
-    } else if (dob.certificateOfOccupancy) {
-      lines.push(`Certificate of occupancy: ${dob.certificateOfOccupancy}`);
-    }
-    if (dob.recentJobs.length > 0) {
-      const job = dob.recentJobs[0];
-      lines.push(`Latest DOB job: ${job.jobNumber ?? "unknown"} ${job.jobType ?? ""} ${job.status ?? ""} ${job.latestActionDate ?? ""}`.trim());
-    }
-  } else {
-    lines.push("DOB BIS: could not retrieve data");
-  }
-
-  return lines.join("\n");
-}
-
-function positiveNumberText(value: string | null): string | null {
-  if (!value) return null;
-  const parsed = Number(value.replace(/,/g, ""));
-  return Number.isFinite(parsed) && parsed > 0 ? value : null;
 }
 
 export async function enrichParcel(
@@ -838,19 +1028,574 @@ export async function enrichParcel(
   block: string | null,
   lot: string | null,
   address: string | null,
-  _owner: string | null = null
+  owner: string | null = null
 ): Promise<EnrichmentResult> {
-  const [acris, dob] = await Promise.all([
+  // Run scrapes in parallel
+  const [acris, dob, zola] = await Promise.all([
     scrapeAcris(borough, block, lot),
     scrapeDob(borough, block, lot),
+    scrapeZola(borough, block, lot),
   ]);
+
+  const nearby = await scrapeNearbyContext(zola?.latitude ?? null, zola?.longitude ?? null);
+  const [market, assemblage, distress, regulatory, development] = await Promise.all([
+    scrapeMarketContext(borough, block, lot, zola?.latitude ?? null, zola?.longitude ?? null),
+    scrapeAssemblageContext(borough, block, lot, owner),
+    scrapeDistressContext(borough, block, lot),
+    scrapeRegulatoryContext(borough, block, lot, dob?.numberOfUnits ?? null),
+    scrapeDevelopmentMomentumContext(borough, zola?.latitude ?? null, zola?.longitude ?? null),
+  ]);
+  const summary = buildSummary({ acris, dob, zola, nearby, market, assemblage, distress, regulatory, development, address });
 
   return {
     acris,
     dob,
-    summary: buildSummary({ acris, dob, address }),
+    zola,
+    nearby,
+    market,
+    assemblage,
+    distress,
+    regulatory,
+    development,
+    summary,
     scrapedAt: Date.now(),
   };
+}
+
+export async function scrapeNearbyContext(
+  latitude: number | null,
+  longitude: number | null
+): Promise<NearbyContext | null> {
+  if (latitude == null || longitude == null) return null;
+
+  const sourceNotes: string[] = [];
+  const [transit, schools] = await Promise.all([
+    fetchNearbyTransit(latitude, longitude).catch(() => {
+      sourceNotes.push("Transit lookup failed.");
+      return [];
+    }),
+    fetchNearbySchools(latitude, longitude).catch(() => {
+      sourceNotes.push("School lookup failed.");
+      return [];
+    }),
+  ]);
+
+  return {
+    transit,
+    schools,
+    sourceNotes,
+  };
+}
+
+async function fetchNearbyTransit(latitude: number, longitude: number): Promise<NearbyPlace[]> {
+  const url = buildSocrataBoxUrl("https://data.ny.gov/resource/i9wp-a4ja.json", latitude, longitude, 1600, "entrance_latitude", "entrance_longitude", [
+    "stop_name",
+    "daytime_routes",
+    "entrance_type",
+    "entrance_latitude",
+    "entrance_longitude",
+    "complex_id",
+  ]);
+  const rows = await fetchJsonArray<Record<string, unknown>>(url);
+  const byStation = new Map<string, NearbyPlace>();
+
+  for (const row of rows) {
+    const lat = parseNumber(row.entrance_latitude);
+    const lon = parseNumber(row.entrance_longitude);
+    const name = valueString(row.stop_name);
+    if (lat == null || lon == null || !name) continue;
+
+    const distanceMeters = haversineMeters(latitude, longitude, lat, lon);
+    const place: NearbyPlace = {
+      name,
+      category: "Subway",
+      distanceMeters,
+      distanceMiles: metersToMiles(distanceMeters),
+      detail: [valueString(row.daytime_routes), valueString(row.entrance_type)].filter(Boolean).join(" | ") || null,
+      latitude: lat,
+      longitude: lon,
+      sourceUrl: "https://data.ny.gov/resource/i9wp-a4ja",
+    };
+    const key = valueString(row.complex_id) || name;
+    const existing = byStation.get(key);
+    if (!existing || place.distanceMeters < existing.distanceMeters) byStation.set(key, place);
+  }
+
+  return [...byStation.values()].sort(byDistance).slice(0, 5);
+}
+
+async function fetchNearbySchools(latitude: number, longitude: number): Promise<NearbyPlace[]> {
+  // This dataset stores latitude/longitude as text, so Socrata numeric bounding
+  // filters are unreliable. The open-school list is small enough to fetch and
+  // sort locally.
+  const params = new URLSearchParams({
+    "$select": [
+      "location_name",
+      "location_category_description",
+      "grades_final_text",
+      "primary_address_line_1",
+      "latitude",
+      "longitude",
+      "status_descriptions",
+    ].join(","),
+    "$where": "status_descriptions='Open'",
+    "$limit": "5000",
+  });
+  const url = `https://data.cityofnewyork.us/resource/wg9x-4ke6.json?${params.toString()}`;
+  const rows = await fetchJsonArray<Record<string, unknown>>(url);
+
+  return rows
+    .map((row): NearbyPlace | null => {
+      const lat = parseNumber(row.latitude);
+      const lon = parseNumber(row.longitude);
+      const name = valueString(row.location_name);
+      if (lat == null || lon == null || !name) return null;
+      const distanceMeters = haversineMeters(latitude, longitude, lat, lon);
+      return {
+        name,
+        category: valueString(row.location_category_description) || "School",
+        distanceMeters,
+        distanceMiles: metersToMiles(distanceMeters),
+        detail: [valueString(row.grades_final_text), valueString(row.primary_address_line_1)].filter(Boolean).join(" | ") || null,
+        latitude: lat,
+        longitude: lon,
+        sourceUrl: "https://data.cityofnewyork.us/resource/wg9x-4ke6",
+      };
+    })
+    .filter((place): place is NearbyPlace => Boolean(place))
+    .filter((place) => place.distanceMeters <= 1600)
+    .sort(byDistance)
+    .slice(0, 5);
+}
+
+export async function scrapeMarketContext(
+  borough: string | null,
+  block: string | null,
+  lot: string | null,
+  latitude: number | null,
+  longitude: number | null
+): Promise<MarketContext | null> {
+  const bcode = boroughCode(borough);
+  const bbl = `${bcode}${padBlock(block)}${padLot(lot)}`;
+  const sourceNotes: string[] = [];
+
+  const [assessment, subjectSales, nearbySales] = await Promise.all([
+    fetchAssessment(bbl).catch(() => {
+      sourceNotes.push("Assessment lookup failed.");
+      return null;
+    }),
+    fetchSubjectSales(bbl).catch(() => {
+      sourceNotes.push("Subject sales lookup failed.");
+      return [];
+    }),
+    latitude != null && longitude != null
+      ? fetchNearbySales(bcode, latitude, longitude).catch(() => {
+          sourceNotes.push("Nearby sales lookup failed.");
+          return [];
+        })
+      : Promise.resolve([]),
+  ]);
+
+  const pricePerLandSf = nearbySales
+    .map((sale) => sale.pricePerLandSf)
+    .filter((value): value is number => value != null && Number.isFinite(value));
+
+  return {
+    assessment,
+    subjectSales,
+    nearbySales,
+    medianNearbyPricePerLandSf: median(pricePerLandSf),
+    sourceNotes,
+  };
+}
+
+async function fetchAssessment(bbl: string): Promise<TaxAssessment | null> {
+  const rows = await fetchSocrata<Record<string, unknown>>("https://data.cityofnewyork.us/resource/yjxr-fw8i.json", {
+    "$select": "bble,owner,taxclass,bldgcl,fullval,avtot,avland,extot,year,period,valtype",
+    "$where": `bble='${bbl}'`,
+    "$order": "year DESC",
+    "$limit": "1",
+  });
+  const row = rows[0];
+  if (!row) return null;
+  return {
+    taxClass: valueString(row.taxclass),
+    buildingClass: valueString(row.bldgcl),
+    marketValue: parseNumber(row.fullval),
+    assessedTotal: parseNumber(row.avtot),
+    assessedLand: parseNumber(row.avland),
+    exemptionTotal: parseNumber(row.extot),
+    year: valueString(row.year),
+    period: valueString(row.period),
+    sourceUrl: "https://data.cityofnewyork.us/resource/yjxr-fw8i",
+  };
+}
+
+async function fetchSubjectSales(bbl: string): Promise<SaleComp[]> {
+  const rows = await fetchSocrata<Record<string, unknown>>("https://data.cityofnewyork.us/resource/w2pb-icbu.json", {
+    "$select": "bbl,address,neighborhood,building_class_category,sale_price,sale_date,land_square_feet,gross_square_feet,latitude,longitude",
+    "$where": `bbl='${bbl}' and sale_price > 0`,
+    "$order": "sale_date DESC",
+    "$limit": "10",
+  });
+  return rows.map((row) => saleFromRow(row, null, null));
+}
+
+async function fetchNearbySales(boroughCodeValue: string, latitude: number, longitude: number): Promise<SaleComp[]> {
+  const radiusMeters = 1600;
+  const latDelta = radiusMeters / 111320;
+  const lonDelta = radiusMeters / (111320 * Math.max(Math.cos(latitude * Math.PI / 180), 0.2));
+  const rows = await fetchSocrata<Record<string, unknown>>("https://data.cityofnewyork.us/resource/w2pb-icbu.json", {
+    "$select": "bbl,address,neighborhood,building_class_category,sale_price,sale_date,land_square_feet,gross_square_feet,latitude,longitude",
+    "$where": [
+      `borough='${boroughCodeValue}'`,
+      "sale_price > 0",
+      `latitude between ${latitude - latDelta} and ${latitude + latDelta}`,
+      `longitude between ${longitude - lonDelta} and ${longitude + lonDelta}`,
+    ].join(" and "),
+    "$order": "sale_date DESC",
+    "$limit": "200",
+  });
+
+  return rows
+    .map((row) => saleFromRow(row, latitude, longitude))
+    .filter((sale) => sale.distanceMiles == null || sale.distanceMiles <= 1)
+    .filter((sale) => sale.landSquareFeet != null && sale.landSquareFeet > 0)
+    .slice(0, 8);
+}
+
+function saleFromRow(row: Record<string, unknown>, latitude: number | null, longitude: number | null): SaleComp {
+  const salePrice = parseNumber(row.sale_price);
+  const landSf = parseNumber(row.land_square_feet);
+  const lat = parseNumber(row.latitude);
+  const lon = parseNumber(row.longitude);
+  const distanceMeters = latitude != null && longitude != null && lat != null && lon != null
+    ? haversineMeters(latitude, longitude, lat, lon)
+    : null;
+
+  return {
+    bbl: valueString(row.bbl),
+    address: valueString(row.address),
+    neighborhood: valueString(row.neighborhood),
+    buildingClassCategory: valueString(row.building_class_category),
+    salePrice,
+    saleDate: valueString(row.sale_date)?.slice(0, 10) ?? null,
+    landSquareFeet: landSf,
+    grossSquareFeet: parseNumber(row.gross_square_feet),
+    pricePerLandSf: salePrice != null && landSf != null && landSf > 0
+      ? Math.round(salePrice / landSf)
+      : null,
+    distanceMiles: distanceMeters == null ? null : metersToMiles(distanceMeters),
+  };
+}
+
+export async function scrapeAssemblageContext(
+  borough: string | null,
+  block: string | null,
+  lot: string | null,
+  owner: string | null
+): Promise<AssemblageContext | null> {
+  const bcode = boroughCode(borough);
+  const bl = (block ?? "0").trim().replace(/^0+/, "") || "0";
+  const lotNum = Number((lot ?? "0").trim().replace(/^0+/, "") || "0");
+  const subjectBbl = `${bcode}${padBlock(block)}${padLot(lot)}`;
+  const sql = `
+    SELECT bbl, address, ownername, lot, lotarea, builtfar, residfar, zonedist1
+    FROM dcp_mappluto
+    WHERE borocode=${bcode} AND block=${bl}
+  `;
+  const rawData = await fetchCartoRows(sql);
+  const rows = rawData?.rows ?? [];
+  if (rows.length === 0) return null;
+
+  const subjectOwner = normalizeOwner(owner);
+  const parcels = rows.map(assemblageParcelFromRow);
+  const sameOwnerSameBlock = subjectOwner
+    ? parcels.filter((parcel) => normalizeOwner(parcel.owner) === subjectOwner && parcel.bbl !== subjectBbl)
+    : [];
+  const immediateNeighbors = rows
+    .filter((row) => Math.abs((parseNumber(row.lot) ?? -999999) - lotNum) <= 2 && (parseNumber(row.lot) ?? -999999) !== lotNum)
+    .map(assemblageParcelFromRow)
+    .slice(0, 6);
+  const sameBlockUnderbuilt = parcels
+    .filter((parcel) => parcel.bbl !== subjectBbl)
+    .filter((parcel) => (parcel.estimatedUnusedBuildableSf ?? 0) > 2500)
+    .sort((a, b) => (b.estimatedUnusedBuildableSf ?? 0) - (a.estimatedUnusedBuildableSf ?? 0))
+    .slice(0, 6);
+
+  const combined = uniqueAssemblageParcels([...sameOwnerSameBlock, ...immediateNeighbors]);
+
+  return {
+    sameOwnerSameBlock,
+    immediateNeighbors,
+    sameBlockUnderbuilt,
+    potentialCombinedLotArea: sumNullable(combined.map((parcel) => parcel.lotArea)),
+    potentialCombinedUnusedSf: sumNullable(combined.map((parcel) => parcel.estimatedUnusedBuildableSf)),
+    sourceUrl: "https://planninglabs.carto.com/api/v2/sql",
+    sourceNotes: [],
+  };
+}
+
+export async function scrapeDistressContext(
+  borough: string | null,
+  block: string | null,
+  lot: string | null
+): Promise<DistressContext | null> {
+  const bbl = `${boroughCode(borough)}${padBlock(block)}${padLot(lot)}`;
+  const sourceNotes: string[] = [];
+  const rows = await fetchSocrata<Record<string, unknown>>("https://data.cityofnewyork.us/resource/scjx-j6np.json", {
+    "$select": "code,type_acct,sum_bal,sum_liab,due_date,taxyear",
+    "$where": `parid='${bbl}' and sum_bal > 0`,
+    "$order": "due_date DESC",
+    "$limit": "25",
+  }).catch(() => {
+    sourceNotes.push("Property charges lookup failed.");
+    return [];
+  });
+
+  const charges = uniqueCharges(rows.map((row) => ({
+    code: valueString(row.code),
+    accountType: valueString(row.type_acct),
+    balance: parseNumber(row.sum_bal),
+    liability: parseNumber(row.sum_liab),
+    dueDate: valueString(row.due_date)?.slice(0, 10) ?? null,
+    taxYear: valueString(row.taxyear),
+  })));
+  const openChargeBalance = sumNullable(charges.map((charge) => charge.balance));
+
+  return {
+    openChargeBalance,
+    charges: charges.slice(0, 6),
+    hasOpenCharges: (openChargeBalance ?? 0) > 0,
+    sourceUrl: "https://data.cityofnewyork.us/resource/scjx-j6np",
+    sourceNotes,
+  };
+}
+
+function uniqueCharges(charges: DistressCharge[]): DistressCharge[] {
+  const seen = new Set<string>();
+  return charges.filter((charge) => {
+    const key = `${charge.code}|${charge.accountType}|${charge.balance}|${charge.dueDate}|${charge.taxYear}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export async function scrapeRegulatoryContext(
+  borough: string | null,
+  block: string | null,
+  lot: string | null,
+  unitCount: string | null
+): Promise<RegulatoryContext | null> {
+  const boro = boroughCode(borough);
+  const sourceNotes: string[] = [];
+  const rows = await fetchSocrata<Record<string, unknown>>("https://data.cityofnewyork.us/resource/tesw-yqqr.json", {
+    "$select": "registrationid,buildingid,lastregistrationdate,registrationenddate",
+    "$where": `boroid='${boro}' and block='${Number(block ?? 0)}' and lot='${Number(lot ?? 0)}'`,
+    "$order": "lastregistrationdate DESC",
+    "$limit": "1",
+  }).catch(() => {
+    sourceNotes.push("HPD registration lookup failed.");
+    return [];
+  });
+
+  const row = rows[0];
+  const registrationId = row ? valueString(row.registrationid) : null;
+  const contacts = registrationId ? await fetchHpdRegistrationContacts(registrationId).catch(() => {
+    sourceNotes.push("HPD registration contacts lookup failed.");
+    return [];
+  }) : [];
+  const units = parseNumber(unitCount);
+  const riskNote = row
+    ? "HPD multiple dwelling registration found; confirm legal occupancy and tenant status."
+    : units != null && units >= 3
+      ? "No HPD registration found despite 3+ reported units; verify registration and legal occupancy."
+      : "No HPD registration found; this is common for true owner-occupied 1-2 family properties but should be verified for rentals.";
+
+  return {
+    hpdRegistration: row ? {
+      registrationId,
+      buildingId: valueString(row.buildingid),
+      lastRegistrationDate: valueString(row.lastregistrationdate)?.slice(0, 10) ?? null,
+      registrationEndDate: valueString(row.registrationenddate)?.slice(0, 10) ?? null,
+      contacts,
+    } : null,
+    isHpdRegistered: Boolean(row),
+    registrationRiskNote: riskNote,
+    sourceUrl: "https://data.cityofnewyork.us/resource/tesw-yqqr",
+    sourceNotes,
+  };
+}
+
+async function fetchHpdRegistrationContacts(registrationId: string): Promise<string[]> {
+  const rows = await fetchSocrata<Record<string, unknown>>("https://data.cityofnewyork.us/resource/feu5-w2e2.json", {
+    "$select": "type,contactdescription,corporationname,businesshousenumber,businessstreetname,businesscity,businessstate,businesszip",
+    "$where": `registrationid='${registrationId}'`,
+    "$limit": "8",
+  });
+  return rows.map((row) => [
+    valueString(row.type),
+    valueString(row.contactdescription),
+    valueString(row.corporationname),
+    [valueString(row.businesshousenumber), valueString(row.businessstreetname), valueString(row.businesscity), valueString(row.businessstate), valueString(row.businesszip)]
+      .filter(Boolean)
+      .join(" "),
+  ].filter(Boolean).join(" | "));
+}
+
+export async function scrapeDevelopmentMomentumContext(
+  borough: string | null,
+  latitude: number | null,
+  longitude: number | null
+): Promise<DevelopmentMomentumContext | null> {
+  if (latitude == null || longitude == null) return null;
+  const sourceNotes: string[] = [];
+  const boroughNameValue = boroughName(boroughCode(borough));
+  const rows = await fetchSocrata<Record<string, unknown>>("https://data.cityofnewyork.us/resource/ic3t-wcy2.json", {
+    "$select": "job__,house__,street_name,job_type,job_status_descrp,latest_action_date,proposed_no_of_stories,proposed_dwelling_units,total_construction_floor_area,gis_latitude,gis_longitude",
+    "$where": `borough='${boroughNameValue}' and gis_latitude IS NOT NULL and gis_longitude IS NOT NULL`,
+    "$order": "latest_action_date DESC",
+    "$limit": "5000",
+  }).catch(() => {
+    sourceNotes.push("Nearby DOB jobs lookup failed.");
+    return [];
+  });
+
+  const nearbyJobs = rows
+    .map((row): DevelopmentJob | null => {
+      const lat = parseNumber(row.gis_latitude);
+      const lon = parseNumber(row.gis_longitude);
+      if (lat == null || lon == null) return null;
+      const distanceMeters = haversineMeters(latitude, longitude, lat, lon);
+      if (distanceMeters > 1600) return null;
+      return {
+        jobNumber: valueString(row.job__),
+        address: [valueString(row.house__), valueString(row.street_name)].filter(Boolean).join(" ") || null,
+        jobType: valueString(row.job_type),
+        status: valueString(row.job_status_descrp),
+        latestActionDate: cleanDateString(valueString(row.latest_action_date)),
+        proposedStories: parseNumber(row.proposed_no_of_stories),
+        proposedDwellingUnits: parseNumber(row.proposed_dwelling_units),
+        constructionFloorArea: parseNumber(row.total_construction_floor_area),
+        distanceMiles: metersToMiles(distanceMeters),
+      };
+    })
+    .filter((job): job is DevelopmentJob => Boolean(job))
+    .filter((job) => {
+      const dateMs = parseFlexibleDate(job.latestActionDate);
+      if (dateMs == null) return false;
+      const cutoff = new Date();
+      cutoff.setFullYear(cutoff.getFullYear() - 5);
+      return dateMs >= cutoff.getTime();
+    })
+    .filter(uniqueDevelopmentJob)
+    .sort((a, b) => (parseFlexibleDate(b.latestActionDate) ?? 0) - (parseFlexibleDate(a.latestActionDate) ?? 0))
+    .slice(0, 8);
+
+  const activeNearbyJobs = nearbyJobs.filter((job) => !/SIGNED OFF|WITHDRAWN|DISAPPROVED/i.test(job.status ?? "")).length;
+  const largestNearbyJob = nearbyJobs
+    .filter((job) => job.constructionFloorArea != null)
+    .sort((a, b) => (b.constructionFloorArea ?? 0) - (a.constructionFloorArea ?? 0))[0] ?? null;
+
+  return {
+    nearbyJobs,
+    activeNearbyJobs,
+    totalProposedUnits: sumNullable(nearbyJobs.map((job) => job.proposedDwellingUnits)),
+    largestNearbyJob,
+    sourceUrl: "https://data.cityofnewyork.us/resource/ic3t-wcy2",
+    sourceNotes,
+  };
+}
+
+function uniqueDevelopmentJob(job: DevelopmentJob, index: number, jobs: DevelopmentJob[]): boolean {
+  const key = job.jobNumber ?? `${job.address}|${job.latestActionDate}|${job.jobType}`;
+  return jobs.findIndex((other) => (other.jobNumber ?? `${other.address}|${other.latestActionDate}|${other.jobType}`) === key) === index;
+}
+
+function cleanDateString(value: string | null): string | null {
+  return value?.trim() || null;
+}
+
+function parseFlexibleDate(value: string | null): number | null {
+  if (!value) return null;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function assemblageParcelFromRow(row: Record<string, unknown>): AssemblageParcel {
+  const lotArea = parseNumber(row.lotarea);
+  const builtFar = parseNumber(row.builtfar);
+  const residFar = parseNumber(row.residfar);
+  const existing = lotArea != null && builtFar != null ? lotArea * builtFar : null;
+  const max = lotArea != null && residFar != null ? lotArea * residFar : null;
+  return {
+    bbl: String(row.bbl ?? ""),
+    address: valueString(row.address),
+    owner: valueString(row.ownername),
+    lotArea,
+    builtFar,
+    residFar,
+    zoning: valueString(row.zonedist1),
+    estimatedUnusedBuildableSf: max != null && existing != null
+      ? Math.max(0, Math.round(max - existing))
+      : null,
+  };
+}
+
+function normalizeOwner(value: string | null): string | null {
+  if (!value) return null;
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function uniqueAssemblageParcels(items: AssemblageParcel[]): AssemblageParcel[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.bbl)) return false;
+    seen.add(item.bbl);
+    return true;
+  });
+}
+
+function sumNullable(values: Array<number | null>): number | null {
+  const usable = values.filter((value): value is number => value != null && Number.isFinite(value));
+  if (usable.length === 0) return null;
+  return Math.round(usable.reduce((sum, value) => sum + value, 0));
+}
+
+function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+    : sorted[mid];
+}
+
+function buildSocrataBoxUrl(
+  baseUrl: string,
+  latitude: number,
+  longitude: number,
+  radiusMeters: number,
+  latField: string,
+  lonField: string,
+  fields: string[],
+  extraWhere?: string
+): string {
+  const latDelta = radiusMeters / 111320;
+  const lonDelta = radiusMeters / (111320 * Math.max(Math.cos(latitude * Math.PI / 180), 0.2));
+  const where = [
+    `${latField} between ${latitude - latDelta} and ${latitude + latDelta}`,
+    `${lonField} between ${longitude - lonDelta} and ${longitude + lonDelta}`,
+    extraWhere,
+  ].filter(Boolean).join(" and ");
+
+  const params = new URLSearchParams({
+    "$select": fields.join(","),
+    "$where": where,
+    "$limit": "500",
+  });
+  return `${baseUrl}?${params.toString()}`;
 }
 
 async function fetchJsonArray<T>(url: string): Promise<T[]> {
@@ -880,3 +1625,203 @@ function parseNumber(value: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function haversineMeters(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const earthRadiusMeters = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
+  return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function toRad(value: number): number {
+  return value * Math.PI / 180;
+}
+
+function metersToMiles(value: number): number {
+  return Math.round((value / 1609.344) * 100) / 100;
+}
+
+function byDistance(a: NearbyPlace, b: NearbyPlace): number {
+  return a.distanceMeters - b.distanceMeters;
+}
+
+function buildSummary({
+  acris,
+  dob,
+  zola,
+  nearby,
+  market,
+  assemblage,
+  distress,
+  regulatory,
+  development,
+  address,
+}: {
+  acris: AcrisData | null;
+  dob: DobData | null;
+  zola: ZolaData | null;
+  nearby: NearbyContext | null;
+  market: MarketContext | null;
+  assemblage: AssemblageContext | null;
+  distress: DistressContext | null;
+  regulatory: RegulatoryContext | null;
+  development: DevelopmentMomentumContext | null;
+  address: string | null;
+}): string {
+  const lines: string[] = [];
+
+  if (address) lines.push(`Property: ${address}`);
+
+  // ACRIS summary
+  if (acris) {
+    if (acris.lastSaleDate && acris.lastSaleAmount) {
+      lines.push(`Last sale: ${acris.lastSaleDate} — ${acris.lastSaleAmount} (${acris.lastSaleGrantor ?? "?"} → ${acris.lastSaleGrantee ?? "?"})`);
+    } else if (acris.lastSaleDate) {
+      lines.push(`Last deed: ${acris.lastSaleDate} (${acris.lastSaleGrantor ?? "?"} → ${acris.lastSaleGrantee ?? "?"})`);
+    }
+    if (acris.lastMortgageDate) {
+      lines.push(`Last mortgage: ${acris.lastMortgageDate}${acris.lastMortgageAmount ? ` — ${acris.lastMortgageAmount}` : ""}`);
+    }
+    if (acris.distressSignals.length > 0) {
+      const counts = [
+        acris.taxLienCount ? `${acris.taxLienCount} tax lien` : null,
+        acris.lienCount > acris.taxLienCount ? `${acris.lienCount} lien/judgment` : null,
+        acris.lisPendensCount ? `${acris.lisPendensCount} lis pendens` : null,
+        acris.foreclosureCount ? `${acris.foreclosureCount} foreclosure` : null,
+      ].filter(Boolean).join(", ");
+      lines.push(`ACRIS distress filings: ${counts || `${acris.distressSignals.length} filing(s)`}${acris.latestDistressDate ? `; latest ${acris.latestDistressDate}` : ""}`);
+    }
+    lines.push(`ACRIS documents on file: ${acris.totalDocuments}`);
+  } else {
+    lines.push("ACRIS: could not retrieve data");
+  }
+
+  // DOB summary
+  if (dob) {
+    const dobParts: string[] = [];
+    const floors = positiveNumberText(dob.numberOfFloors);
+    const units = positiveNumberText(dob.numberOfUnits);
+    if (floors) dobParts.push(`${floors} floors`);
+    if (units) dobParts.push(`${units} units`);
+    if (dobParts.length > 0) lines.push(`DOB profile: ${dobParts.join(", ")}`);
+    if (dob.openViolations != null) {
+      lines.push(`Open violations: ${dob.openViolations}`);
+    }
+    if (dob.activeJobs) lines.push(`Active jobs/permits: ${dob.activeJobs}`);
+    if (dob.lastPermitDate) lines.push(`Last DOB permit: ${dob.lastPermitDate}`);
+    if (dob.certificatesOfOccupancy.length > 0) {
+      const co = dob.certificatesOfOccupancy[0];
+      lines.push(`Certificate of occupancy: ${[co.issueType, co.issueDate, co.status].filter(Boolean).join(" | ")}`);
+    } else if (dob.certificateOfOccupancy) {
+      lines.push(`Certificate of occupancy: ${dob.certificateOfOccupancy}`);
+    }
+    const activeEcb = dob.ecbViolations.filter((v) => /ACTIVE|OPEN/i.test(v.status ?? ""));
+    if (activeEcb.length > 0) {
+      lines.push(`Active ECB/OATH violations: ${activeEcb.length} (${activeEcb[0].number ?? "unknown"}${activeEcb[0].description ? ` - ${activeEcb[0].description}` : ""})`);
+    }
+    if (dob.recentJobs.length > 0) {
+      const job = dob.recentJobs[0];
+      lines.push(`Latest DOB job: ${job.jobNumber ?? "unknown"} ${job.jobType ?? ""} ${job.status ?? ""} ${job.latestActionDate ?? ""}`.trim());
+    }
+  } else {
+    lines.push("DOB BIS: could not retrieve data");
+  }
+
+  // ZoLa summary
+  if (zola) {
+    const zolaParts: string[] = [];
+    if (zola.zoningDistrict) zolaParts.push(`Zone: ${zola.zoningDistrict}`);
+    if (zola.overlays) zolaParts.push(`Overlay: ${zola.overlays}`);
+    if (zola.specialPurposeDistrict) zolaParts.push(`Special district: ${zola.specialPurposeDistrict}`);
+    if (zola.landmarkStatus) zolaParts.push(`Landmark: ${zola.landmarkStatus}`);
+    if (zola.floodZone) zolaParts.push(`Flood zone: ${zola.floodZone}`);
+    if (zola.historicDistrict) zolaParts.push(`Historic district: ${zola.historicDistrict}`);
+    if (zolaParts.length > 0) lines.push(`ZoLa: ${zolaParts.join(" | ")}`);
+    else lines.push("ZoLa: no additional data from API");
+  } else {
+    lines.push("ZoLa: could not retrieve data");
+  }
+
+  if (nearby) {
+    if (nearby.transit.length > 0) {
+      const closest = nearby.transit[0];
+      lines.push(`Nearest transit: ${closest.name} (${closest.distanceMiles.toFixed(2)} mi${closest.detail ? ` | ${closest.detail}` : ""})`);
+    } else {
+      lines.push("Nearest transit: no subway entrance found within about 1 mile");
+    }
+
+    if (nearby.schools.length > 0) {
+      const closest = nearby.schools[0];
+      lines.push(`Nearest school: ${closest.name} (${closest.distanceMiles.toFixed(2)} mi${closest.detail ? ` | ${closest.detail}` : ""})`);
+    } else {
+      lines.push("Nearest school: no open DOE school found within about 1 mile");
+    }
+  }
+
+  if (market) {
+    if (market.assessment) {
+      lines.push(`Assessment: ${market.assessment.year ?? "unknown year"} market value ${formatDollars(market.assessment.marketValue)} | assessed ${formatDollars(market.assessment.assessedTotal)} | tax class ${market.assessment.taxClass ?? "?"}`);
+    }
+    if (market.subjectSales.length > 0) {
+      const latest = market.subjectSales[0];
+      lines.push(`Subject DOF sale: ${latest.saleDate ?? "unknown date"} ${formatDollars(latest.salePrice)}${latest.pricePerLandSf ? ` (${formatDollars(latest.pricePerLandSf)}/land sf)` : ""}`);
+    }
+    if (market.nearbySales.length > 0) {
+      lines.push(`Nearby sales comps: ${market.nearbySales.length} within about 1 mile; median ${formatDollars(market.medianNearbyPricePerLandSf)}/land sf`);
+    }
+  }
+
+  if (assemblage) {
+    if (assemblage.sameOwnerSameBlock.length > 0) {
+      lines.push(`Assemblage: ${assemblage.sameOwnerSameBlock.length} same-owner parcel(s) on the block`);
+    }
+    if (assemblage.immediateNeighbors.length > 0) {
+      lines.push(`Adjacent/nearby lots checked: ${assemblage.immediateNeighbors.length}; potential combined lot area ${formatNumber(assemblage.potentialCombinedLotArea)} sf`);
+    }
+    if (assemblage.sameBlockUnderbuilt.length > 0) {
+      const best = assemblage.sameBlockUnderbuilt[0];
+      lines.push(`Most underbuilt same-block parcel: ${best.address ?? best.bbl} with about ${formatNumber(best.estimatedUnusedBuildableSf)} unused sf`);
+    }
+  }
+
+  if (distress) {
+    if (distress.hasOpenCharges) {
+      lines.push(`Distress signal: open DOF property charges total about ${formatDollars(distress.openChargeBalance)}`);
+    } else {
+      lines.push("Distress signal: no open DOF property charges found");
+    }
+  }
+
+  if (regulatory) {
+    lines.push(`Regulatory risk: ${regulatory.registrationRiskNote ?? "HPD registration status unknown"}`);
+    if (regulatory.hpdRegistration) {
+      lines.push(`HPD registration: active through ${regulatory.hpdRegistration.registrationEndDate ?? "unknown"}`);
+    }
+  }
+
+  if (development) {
+    lines.push(`Nearby development momentum: ${development.nearbyJobs.length} DOB job filing(s) within about 1 mile; ${development.activeNearbyJobs} appear active/recent`);
+    if (development.largestNearbyJob) {
+      lines.push(`Largest nearby DOB job: ${development.largestNearbyJob.address ?? development.largestNearbyJob.jobNumber ?? "unknown"} ${formatNumber(development.largestNearbyJob.constructionFloorArea)} sf, ${development.largestNearbyJob.proposedDwellingUnits ?? "?"} units`);
+    }
+  }
+
+
+  return lines.join("\n");
+}
+
+function positiveNumberText(value: string | null): string | null {
+  if (!value) return null;
+  const parsed = Number(value.replace(/,/g, ""));
+  return Number.isFinite(parsed) && parsed > 0 ? value : null;
+}
+
+function formatDollars(value: number | null): string {
+  return value == null ? "unknown" : `$${Math.round(value).toLocaleString()}`;
+}
+
+function formatNumber(value: number | null): string {
+  return value == null ? "unknown" : Math.round(value).toLocaleString();
+}
